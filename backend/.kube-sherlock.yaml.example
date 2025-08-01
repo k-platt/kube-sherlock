@@ -1,0 +1,24 @@
+server:
+  host: "localhost"
+  port: "8080"
+
+gemini:
+  api_key: ""  # Set via environment variable GEMINI_API_KEY
+  model: "gemini-2.0-flash"
+
+kubernetes:
+  config_path: "~/.kube/config"
+  context: ""  # Use default context if empty
+
+gather:
+  resources: false
+  namespace: "default"
+  resource_types:
+    - "pods"
+    - "deployments" 
+    - "services"
+    - "events"
+  label_selector: ""
+
+output:
+  verbose: false
