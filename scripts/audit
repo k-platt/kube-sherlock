@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Security scan for kube-sherlock. Non-interactive; needs network (vuln DBs,
+# pinned scanner downloads) but no credentials.
+#
+#   ==> Vulnerabilities  govulncheck (backend/, Go) + npm audit --omit=dev (frontend)
+#   ==> Secrets          gitleaks dir . (working tree, default ruleset)
+#   ==> Lifecycle        runtime versions + outdated direct deps (informational)
+#
+# Exit codes: 0 = clean, 1 = vulnerabilities or secrets found, 2 = a scanner failed to run.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+GOVULNCHECK_VERSION="v1.1.4" # last release that builds with Go < 1.26
+GITLEAKS_VERSION="8.30.1"
+
+BIN="$ROOT/.bin"
+mkdir -p "$BIN"
+
+found=0
+failed=0
+
+section() { printf '\n==> %s\n' "$*"; }
+note() { printf -- '--- %s\n' "$*"; }
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+install_govulncheck() {
+  local marker="$BIN/.govulncheck-$GOVULNCHECK_VERSION"
+  [[ -x "$BIN/govulncheck" && -f "$marker" ]] && return 0
+  (cd backend && GOBIN="$BIN" go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION") || return 1
+  rm -f "$BIN"/.govulncheck-* && touch "$marker"
+}
+
+install_gitleaks() {
+  local marker="$BIN/.gitleaks-$GITLEAKS_VERSION"
+  [[ -x "$BIN/gitleaks" && -f "$marker" ]] && return 0
+  local os arch asset base tmp want got
+  case "$(uname -s)" in
+    Darwin) os=darwin ;; Linux) os=linux ;; *) echo "unsupported OS: $(uname -s)" >&2; return 1 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64 | amd64) arch=x64 ;; arm64 | aarch64) arch=arm64 ;; *) echo "unsupported arch: $(uname -m)" >&2; return 1 ;;
+  esac
+  asset="gitleaks_${GITLEAKS_VERSION}_${os}_${arch}.tar.gz"
+  base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+  tmp="$(mktemp -d)"
+  curl -sSfL -o "$tmp/$asset" "$base/$asset" &&
+    curl -sSfL -o "$tmp/checksums.txt" "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt" || { rm -rf "$tmp"; return 1; }
+  want="$(awk -v a="$asset" '$2 == a {print $1}' "$tmp/checksums.txt")"
+  got="$(sha256 "$tmp/$asset")"
+  if [[ -z "$want" || "$want" != "$got" ]]; then
+    echo "gitleaks checksum mismatch for $asset" >&2; rm -rf "$tmp"; return 1
+  fi
+  tar -xzf "$tmp/$asset" -C "$tmp" gitleaks && mv "$tmp/gitleaks" "$BIN/gitleaks" && chmod +x "$BIN/gitleaks" || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+  rm -f "$BIN"/.gitleaks-* && touch "$marker"
+}
+
+# ---------------------------------------------------------------------------
+section "Vulnerabilities"
+
+note "govulncheck $GOVULNCHECK_VERSION (backend)"
+if install_govulncheck; then
+  (cd backend && "$BIN/govulncheck" ./...)
+  rc=$?
+  case $rc in
+    0) ;;
+    3) found=1 ;;
+    *) echo "govulncheck failed (exit $rc)" >&2; failed=1 ;;
+  esac
+else
+  echo "failed to install govulncheck" >&2; failed=1
+fi
+
+note "npm audit --omit=dev (frontend)"
+audit_json="$(mktemp)"
+npm audit --omit=dev --json >"$audit_json" 2>/dev/null
+node - "$audit_json" <<'EOF'
+const fs = require('fs');
+let r;
+try { r = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')); } catch (e) {
+  console.error('npm audit produced no parseable JSON'); process.exit(2);
+}
+if (r.error) { console.error('npm audit error:', r.error.summary || JSON.stringify(r.error)); process.exit(2); }
+const counts = (r.metadata && r.metadata.vulnerabilities) || {};
+const vulns = r.vulnerabilities || {};
+for (const [name, v] of Object.entries(vulns)) {
+  const via = (v.via || []).map(x => typeof x === 'string' ? x : `${x.title} (${x.url})`).join('; ');
+  console.log(`${v.severity.padEnd(8)} ${name}@${v.range}  ${via}`);
+}
+const total = counts.total || 0;
+console.log(`npm audit: ${total} vulnerable package(s)`, JSON.stringify(counts));
+process.exit(total > 0 ? 1 : 0);
+EOF
+rc=$?
+rm -f "$audit_json"
+case $rc in
+  0) ;;
+  1) found=1 ;;
+  *) failed=1 ;;
+esac
+
+# ---------------------------------------------------------------------------
+section "Secrets"
+
+note "gitleaks $GITLEAKS_VERSION dir ."
+if install_gitleaks; then
+  # Default ruleset; only gitignored, regenerated build/dependency output is skipped.
+  cfg="$BIN/gitleaks.toml"
+  cat >"$cfg" <<'EOF'
+[extend]
+useDefault = true
+
+[allowlist]
+description = "gitignored build and dependency output"
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)\.next/''',
+  '''(^|/)\.bin/''',
+  '''(^|/)\.genkit/''',
+  '''(^|/)out/''',
+  '''(^|/)coverage/''',
+]
+EOF
+  "$BIN/gitleaks" dir . --config "$cfg" --redact --no-banner --verbose --exit-code 3
+  rc=$?
+  case $rc in
+    0) ;;
+    3) found=1 ;;
+    *) echo "gitleaks failed (exit $rc)" >&2; failed=1 ;;
+  esac
+else
+  echo "failed to install gitleaks" >&2; failed=1
+fi
+
+# ---------------------------------------------------------------------------
+section "Lifecycle"
+# Informational only: never affects the exit code.
+{
+  note "runtimes"
+  go version || true
+  echo "go.mod: $(grep -E '^go ' backend/go.mod || true)"
+  echo "node $(node --version 2>/dev/null || echo 'not found'), npm $(npm --version 2>/dev/null || echo 'not found')"
+
+  note "outdated direct Go modules (backend)"
+  (cd backend && go list -m -u -f '{{if and (not .Indirect) (not .Main) .Update}}{{.Path}} {{.Version}} -> {{.Update.Version}}{{end}}' all 2>/dev/null) || echo "(go list failed)"
+
+  note "outdated direct npm packages (frontend)"
+  npm outdated 2>/dev/null || true
+} || true
+
+# ---------------------------------------------------------------------------
+section "Summary"
+if [[ $failed -ne 0 ]]; then
+  echo "one or more scanners failed to run"; exit 2
+elif [[ $found -ne 0 ]]; then
+  echo "vulnerabilities or secrets found"; exit 1
+fi
+echo "no vulnerabilities or secrets found"
+exit 0

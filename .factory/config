@@ -1,0 +1,18 @@
+# Per-repo factory settings. Read from origin/main, so changes only take effect once merged.
+# Only these keys are honored; anything else is ignored. Changes to .factory/ never auto-merge.
+#
+# MODEL=opus
+# MAX_PARALLEL=3
+# MAX_FIX_ATTEMPTS=3
+# MAX_REVIEW_ROUNDS=2
+# BUDGET_IMPLEMENT_USD=8
+# BUDGET_FIX_USD=4
+# BUDGET_REVIEW_USD=2
+# BUDGET_SECURITY_USD=2
+# BUDGET_AUDIT_USD=5
+# AUTO_MERGE=true
+# SECURITY_REVIEW=true
+# SECURITY_BLOCK_SEVERITIES="critical high"
+# AUDIT_INTERVAL_HOURS=24
+# AUDIT_AUTOFIX_SEVERITIES="critical high medium"
+# PROTECTED_PATHS_EXTRA='^migrations/'   # added to the factory's protected paths, never replaces them
