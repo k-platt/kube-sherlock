@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Single quality gate for kube-sherlock. Runs identically locally and in CI.
+# Wraps the project's existing tooling only:
+#   frontend (repo root, Next.js/TypeScript): npm ci, npm run typecheck, npm run build
+#   backend  (backend/, Go):                  go mod download, gofmt, go vet, go test
+#
+# Known gaps (tracked as backlog issues, intentionally not run here):
+#   - `npm run lint` (next lint): no ESLint config is committed, so it starts an
+#     interactive setup prompt and exits 1. Re-enable once an ESLint config exists.
+#   - No frontend formatter (Prettier) is configured.
+#   - No frontend test runner exists; Go has no *_test.go files yet (go test still
+#     compiles every package).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+export CI="${CI:-1}"
+export NEXT_TELEMETRY_DISABLED=1
+
+step() { printf '\n==> %s\n' "$*"; }
+
+step "Install frontend dependencies (npm ci)"
+npm ci --no-audit --no-fund --loglevel=error
+
+step "Install backend dependencies (go mod download)"
+(cd backend && go mod download)
+
+step "Format check: gofmt (backend)"
+unformatted="$(cd backend && gofmt -l .)"
+if [[ -n "$unformatted" ]]; then
+  echo "These files need gofmt -w:" >&2
+  echo "$unformatted" >&2
+  exit 1
+fi
+
+step "Lint: go vet (backend)"
+(cd backend && go vet ./...)
+
+step "Type check: tsc --noEmit (frontend)"
+npm run --silent typecheck
+
+step "Build: next build (frontend)"
+npm run --silent build
+
+step "Tests: go test (backend)"
+(cd backend && go test -count=1 ./...)
+
+printf '\n==> All checks passed\n'

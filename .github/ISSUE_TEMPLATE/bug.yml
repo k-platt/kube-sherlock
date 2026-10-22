@@ -1,0 +1,31 @@
+name: Bug
+description: Something is broken. The factory will reproduce it with a test, then fix it.
+title: "fix: "
+labels: ["type:bug", "factory:ready"]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands and input.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Output, error and exit code.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Version, environment, suspected cause. Optional.
